@@ -1,0 +1,581 @@
+import React, { useState, useEffect } from 'react';
+import { AlertCircle, Shield, FileText, Brain, ThumbsUp, ThumbsDown, TrendingUp, RotateCcw, Database, Download } from 'lucide-react';
+
+export default function PHIDetector() {
+  const [clinicalNote, setClinicalNote] = useState('');
+  const [result, setResult] = useState(null);
+  const [model, setModel] = useState(null);
+  const [trainingDatabase, setTrainingDatabase] = useState([]);
+  const [trainingStats, setTrainingStats] = useState({ correct: 0, incorrect: 0, accuracy: 0, totalExamples: 0 });
+  const [isTraining, setIsTraining] = useState(false);
+
+  // Initialize storage system
+  useEffect(() => {
+    initializeStorage();
+  }, []);
+
+  const initializeStorage = async () => {
+    try {
+      // Try to load from persistent storage
+      const modelData = await window.storage?.get('phi_model');
+      const dbData = await window.storage?.get('phi_training_db');
+      const statsData = await window.storage?.get('phi_stats');
+
+      if (modelData?.value) {
+        setModel(JSON.parse(modelData.value));
+      } else {
+        // Initialize default model
+        const initialModel = {
+          featureWeights: {
+            'has_title_before': 2.0,
+            'has_possessive': 1.5,
+            'near_patient_word': 3.0,
+            'near_geographic_word': -2.5,
+            'near_institution_word': -2.0,
+            'capitalized_sequence': 1.8,
+            'after_preposition': -1.5,
+            'has_suffix_indicator': 1.2,
+            'in_quotes': 1.0,
+            'near_relationship_word': 2.5,
+            'looks_like_date': 5.0,
+            'looks_like_phone': 5.0,
+            'looks_like_email': 5.0,
+            'looks_like_ssn': 5.0,
+            'looks_like_mrn': 4.0,
+            'looks_like_address': 3.5,
+            'looks_like_zip': 4.0,
+            'is_all_caps': 0.5,
+            'has_numbers': 0.8,
+            'length_over_10': -0.3,
+            'common_word': -2.0
+          },
+          learningRate: 0.15,
+          version: 1,
+          lastTrained: Date.now()
+        };
+        setModel(initialModel);
+        await saveModel(initialModel);
+      }
+
+      if (dbData?.value) {
+        const db = JSON.parse(dbData.value);
+        setTrainingDatabase(db);
+      }
+
+      if (statsData?.value) {
+        setTrainingStats(JSON.parse(statsData.value));
+      }
+    } catch (error) {
+      console.error('Storage initialization error:', error);
+      // Fallback to default initialization
+      const initialModel = {
+        featureWeights: {
+          'has_title_before': 2.0,
+          'near_patient_word': 3.0,
+          'near_geographic_word': -2.5,
+          'looks_like_date': 5.0,
+          'looks_like_phone': 5.0,
+          'looks_like_email': 5.0,
+        },
+        learningRate: 0.15,
+        version: 1,
+        lastTrained: Date.now()
+      };
+      setModel(initialModel);
+    }
+  };
+
+  const saveModel = async (modelData) => {
+    try {
+      if (window.storage) {
+        await window.storage.set('phi_model', JSON.stringify(modelData));
+      }
+    } catch (error) {
+      console.error('Error saving model:', error);
+    }
+  };
+
+  const saveDatabase = async (db) => {
+    try {
+      if (window.storage) {
+        await window.storage.set('phi_training_db', JSON.stringify(db));
+      }
+    } catch (error) {
+      console.error('Error saving database:', error);
+    }
+  };
+
+  const saveStats = async (stats) => {
+    try {
+      if (window.storage) {
+        await window.storage.set('phi_stats', JSON.stringify(stats));
+      }
+    } catch (error) {
+      console.error('Error saving stats:', error);
+    }
+  };
+
+  // Extract features from a word and its context
+  const extractFeatures = (word, beforeContext, afterContext, fullText) => {
+    const features = {};
+    const before = beforeContext.toLowerCase();
+    const after = afterContext.toLowerCase();
+    const wordLower = word.toLowerCase();
+
+    features['has_title_before'] = /\b(mr|mrs|ms|dr|miss|prof)\.?\s*$/i.test(before) ? 1 : 0;
+    features['has_possessive'] = /['']s\b/.test(after) ? 1 : 0;
+    
+    const patientWords = ['patient', 'pt', 'evaluated', 'examined', 'treated', 'saw', 'visited'];
+    features['near_patient_word'] = patientWords.some(w => before.includes(w) || after.includes(w)) ? 1 : 0;
+    
+    const geoWords = ['in', 'from', 'to', 'at', 'near', 'state', 'city', 'country'];
+    features['near_geographic_word'] = geoWords.some(w => before.split(/\s+/).slice(-3).join(' ').includes(w)) ? 1 : 0;
+    
+    const instWords = ['hospital', 'university', 'college', 'clinic', 'center', 'institute'];
+    features['near_institution_word'] = instWords.some(w => after.includes(w)) ? 1 : 0;
+    
+    const afterWords = after.trim().split(/\s+/);
+    features['capitalized_sequence'] = (afterWords[0] && /^[A-Z][a-z]+$/.test(afterWords[0])) ? 1 : 0;
+    
+    features['after_preposition'] = /\b(in|at|from|to|on|near)\s*$/i.test(before) ? 1 : 0;
+    
+    const relationshipWords = ['mother', 'father', 'son', 'daughter', 'wife', 'husband', 'brother', 'sister'];
+    features['near_relationship_word'] = relationshipWords.some(w => before.includes(w) || after.includes(w)) ? 1 : 0;
+    
+    features['has_suffix_indicator'] = /\b(jr|sr|ii|iii|iv|md|phd|rn)\b/i.test(after) ? 1 : 0;
+    features['in_quotes'] = (before.includes('"') && after.includes('"')) ? 1 : 0;
+
+    features['looks_like_date'] = /\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}/.test(word) ? 1 : 0;
+    features['looks_like_phone'] = /\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/.test(word) ? 1 : 0;
+    features['looks_like_email'] = /@/.test(word) ? 1 : 0;
+    features['looks_like_ssn'] = /\d{3}-\d{2}-\d{4}/.test(word) ? 1 : 0;
+    features['looks_like_mrn'] = /\b(MRN|ID)[\s:#]*\d+/i.test(before + word + after) ? 1 : 0;
+    features['looks_like_address'] = /\d+\s+[A-Z][a-z]+\s+(street|st|avenue|ave|road|rd|drive|dr|lane|ln)/i.test(before + word + after) ? 1 : 0;
+    features['looks_like_zip'] = /^\d{5}(-\d{4})?$/.test(word) ? 1 : 0;
+
+    features['is_all_caps'] = word === word.toUpperCase() && word.length > 1 ? 1 : 0;
+    features['has_numbers'] = /\d/.test(word) ? 1 : 0;
+    features['length_over_10'] = word.length > 10 ? 1 : 0;
+    
+    const commonWords = new Set(['the', 'and', 'for', 'with', 'this', 'that', 'hospital', 'clinic', 'medical', 'health']);
+    features['common_word'] = commonWords.has(wordLower) ? 1 : 0;
+
+    return features;
+  };
+
+  // Calculate score using current model weights
+  const calculateScore = (features, weights) => {
+    let score = 0;
+    for (const [feature, value] of Object.entries(features)) {
+      score += (weights[feature] || 0) * value;
+    }
+    return score;
+  };
+
+  // Add training example to database
+  const addToDatabase = async (word, features, isPHI, beforeContext, afterContext) => {
+    const example = {
+      id: Date.now() + Math.random(),
+      word,
+      features,
+      label: isPHI ? 'phi' : 'not_phi',
+      beforeContext: beforeContext.slice(-50),
+      afterContext: afterContext.slice(0, 50),
+      timestamp: Date.now()
+    };
+
+    const newDb = [...trainingDatabase, example];
+    setTrainingDatabase(newDb);
+    await saveDatabase(newDb);
+    
+    return example;
+  };
+
+  // Retrain model using entire database (batch learning)
+  const retrainModel = async () => {
+    if (trainingDatabase.length === 0) return;
+
+    setIsTraining(true);
+
+    // Create a copy of current weights
+    let newWeights = { ...model.featureWeights };
+    const learningRate = model.learningRate;
+
+    // Train on all examples in database multiple times (epochs)
+    const epochs = 3;
+    
+    for (let epoch = 0; epoch < epochs; epoch++) {
+      // Shuffle training data for better learning
+      const shuffled = [...trainingDatabase].sort(() => Math.random() - 0.5);
+      
+      for (const example of shuffled) {
+        const score = calculateScore(example.features, newWeights);
+        const predicted = score > 3.0 ? 1 : 0;
+        const actual = example.label === 'phi' ? 1 : 0;
+        const error = actual - predicted;
+
+        // Update weights for each feature
+        for (const [feature, value] of Object.entries(example.features)) {
+          if (value !== 0) {
+            newWeights[feature] = (newWeights[feature] || 0) + learningRate * error * value;
+            newWeights[feature] = Math.max(-10, Math.min(10, newWeights[feature]));
+          }
+        }
+      }
+    }
+
+    // Update model
+    const updatedModel = {
+      ...model,
+      featureWeights: newWeights,
+      lastTrained: Date.now(),
+      version: model.version + 1
+    };
+
+    setModel(updatedModel);
+    await saveModel(updatedModel);
+    
+    setIsTraining(false);
+  };
+
+  // Provide feedback on a detection
+  const provideFeedback = async (detection, isCorrect) => {
+    // Add to database
+    await addToDatabase(
+      detection.value,
+      detection.features,
+      isCorrect,
+      detection.beforeContext,
+      detection.afterContext
+    );
+
+    // Update stats
+    const newStats = {
+      correct: trainingStats.correct + (isCorrect ? 1 : 0),
+      incorrect: trainingStats.incorrect + (isCorrect ? 0 : 1),
+      totalExamples: trainingStats.totalExamples + 1
+    };
+    newStats.accuracy = ((newStats.correct / newStats.totalExamples) * 100).toFixed(1);
+    
+    setTrainingStats(newStats);
+    await saveStats(newStats);
+
+    // Mark feedback in UI
+    setResult(prev => ({
+      ...prev,
+      phi_detected: prev.phi_detected.map(d =>
+        d === detection ? { ...d, feedbackGiven: isCorrect ? 'correct' : 'incorrect' } : d
+      )
+    }));
+
+    // Retrain model with new data
+    setTimeout(() => retrainModel(), 100);
+  };
+
+  // Detect PHI using learned model
+  const detectPHI = () => {
+    if (!model) return;
+
+    const text = clinicalNote;
+    const phiDetected = [];
+    let redactedText = text;
+
+    const words = text.split(/\b/);
+    let currentIndex = 0;
+
+    for (let i = 0; i < words.length; i++) {
+      const word = words[i];
+      
+      if (!/[A-Za-z0-9]/.test(word)) {
+        currentIndex += word.length;
+        continue;
+      }
+
+      const beforeContext = words.slice(Math.max(0, i - 10), i).join('');
+      const afterContext = words.slice(i + 1, Math.min(words.length, i + 11)).join('');
+
+      const features = extractFeatures(word, beforeContext, afterContext, text);
+      const score = calculateScore(features, model.featureWeights);
+      const isPHI = score > 3.0;
+
+      if (isPHI) {
+        let category = 'unknown';
+        if (features['looks_like_date']) category = 'date';
+        else if (features['looks_like_phone']) category = 'phone';
+        else if (features['looks_like_email']) category = 'email';
+        else if (features['looks_like_ssn']) category = 'ssn';
+        else if (features['looks_like_mrn']) category = 'mrn';
+        else if (features['looks_like_zip']) category = 'zip_code';
+        else if (features['has_title_before'] || features['near_patient_word']) category = 'name';
+        else if (features['looks_like_address']) category = 'address';
+
+        phiDetected.push({
+          type: category,
+          value: word,
+          score: score.toFixed(2),
+          features: features,
+          beforeContext: beforeContext,
+          afterContext: afterContext,
+          index: currentIndex
+        });
+      }
+
+      currentIndex += word.length;
+    }
+
+    let offset = 0;
+    phiDetected.forEach(phi => {
+      const replacement = `[REDACTED:${phi.type.toUpperCase()}]`;
+      const start = phi.index + offset;
+      const end = start + phi.value.length;
+      redactedText = redactedText.substring(0, start) + replacement + redactedText.substring(end);
+      offset += replacement.length - phi.value.length;
+    });
+
+    setResult({
+      phi_detected: phiDetected,
+      redacted_note: redactedText
+    });
+  };
+
+  const resetModel = async () => {
+    if (confirm('Are you sure you want to reset the model and delete all training data? This cannot be undone.')) {
+      try {
+        if (window.storage) {
+          await window.storage.delete('phi_model');
+          await window.storage.delete('phi_training_db');
+          await window.storage.delete('phi_stats');
+        }
+        window.location.reload();
+      } catch (error) {
+        console.error('Error resetting:', error);
+      }
+    }
+  };
+
+  const exportDatabase = () => {
+    const data = {
+      model: model,
+      database: trainingDatabase,
+      stats: trainingStats,
+      exportDate: new Date().toISOString()
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `phi-training-data-${Date.now()}.json`;
+    a.click();
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-purple-50 to-indigo-100 p-6">
+      <div className="max-w-6xl mx-auto">
+        <div className="bg-white rounded-lg shadow-xl p-8 mb-6">
+          <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center gap-3">
+              <Brain className="w-8 h-8 text-purple-600" />
+              <div>
+                <h1 className="text-3xl font-bold text-gray-800">
+                  Learning PHI Detector
+                </h1>
+                <p className="text-sm text-gray-600 mt-1">
+                  Trains on persistent database with {trainingDatabase.length} examples
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={exportDatabase}
+                className="flex items-center gap-2 px-4 py-2 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
+              >
+                <Download className="w-4 h-4" />
+                Export
+              </button>
+              <button
+                onClick={resetModel}
+                className="flex items-center gap-2 px-4 py-2 text-sm bg-gray-200 hover:bg-gray-300 rounded-lg transition-colors"
+              >
+                <RotateCcw className="w-4 h-4" />
+                Reset
+              </button>
+            </div>
+          </div>
+
+          {isTraining && (
+            <div className="mb-4 bg-purple-50 border-2 border-purple-300 rounded-lg p-3 flex items-center gap-3">
+              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-purple-600"></div>
+              <span className="text-purple-700 font-semibold">Retraining model on {trainingDatabase.length} examples...</span>
+            </div>
+          )}
+
+          <div className="grid grid-cols-4 gap-4 mb-6">
+            <div className="bg-green-50 border-2 border-green-200 rounded-lg p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm text-green-600 font-semibold">Correct</p>
+                  <p className="text-2xl font-bold text-green-700">{trainingStats.correct}</p>
+                </div>
+                <ThumbsUp className="w-8 h-8 text-green-400" />
+              </div>
+            </div>
+            <div className="bg-red-50 border-2 border-red-200 rounded-lg p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm text-red-600 font-semibold">Incorrect</p>
+                  <p className="text-2xl font-bold text-red-700">{trainingStats.incorrect}</p>
+                </div>
+                <ThumbsDown className="w-8 h-8 text-red-400" />
+              </div>
+            </div>
+            <div className="bg-purple-50 border-2 border-purple-200 rounded-lg p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm text-purple-600 font-semibold">Accuracy</p>
+                  <p className="text-2xl font-bold text-purple-700">{trainingStats.accuracy || 0}%</p>
+                </div>
+                <TrendingUp className="w-8 h-8 text-purple-400" />
+              </div>
+            </div>
+            <div className="bg-blue-50 border-2 border-blue-200 rounded-lg p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm text-blue-600 font-semibold">Database</p>
+                  <p className="text-2xl font-bold text-blue-700">{trainingDatabase.length}</p>
+                </div>
+                <Database className="w-8 h-8 text-blue-400" />
+              </div>
+            </div>
+          </div>
+          
+          <div className="bg-blue-50 border-l-4 border-blue-400 p-4 mb-6">
+            <div className="flex items-start">
+              <AlertCircle className="w-5 h-5 text-blue-600 mt-0.5 mr-3 flex-shrink-0" />
+              <div className="text-sm text-blue-800">
+                <p className="font-semibold mb-1">Database-Powered Learning</p>
+                <p>Every feedback you provide is stored in a persistent database. The model retrains on ALL examples after each feedback, continuously improving its accuracy. The more you train it, the smarter it becomes!</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="mb-6">
+            <label className="block text-sm font-semibold text-gray-700 mb-2">
+              Enter Clinical Note:
+            </label>
+            <textarea
+              value={clinicalNote}
+              onChange={(e) => setClinicalNote(e.target.value)}
+              placeholder="Patient Georgia Smith from Atlanta, Georgia visited on 03/15/2024..."
+              className="w-full h-48 p-4 border-2 border-gray-300 rounded-lg focus:border-purple-500 focus:ring-2 focus:ring-purple-200 transition-colors resize-none font-mono text-sm"
+            />
+          </div>
+
+          <button
+            onClick={detectPHI}
+            disabled={!clinicalNote.trim() || !model}
+            className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-gray-400 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
+          >
+            <Shield className="w-5 h-5" />
+            Detect PHI with AI
+          </button>
+        </div>
+
+        {result && (
+          <div className="grid md:grid-cols-2 gap-6">
+            <div className="bg-white rounded-lg shadow-xl p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <AlertCircle className="w-6 h-6 text-red-600" />
+                <h2 className="text-xl font-bold text-gray-800">
+                  PHI Detected ({result.phi_detected.length})
+                </h2>
+              </div>
+              
+              {result.phi_detected.length === 0 ? (
+                <p className="text-gray-600 italic">No PHI detected in the note.</p>
+              ) : (
+                <div className="space-y-3">
+                  {result.phi_detected.map((phi, index) => (
+                    <div
+                      key={index}
+                      className={`border rounded-lg p-4 ${
+                        phi.feedbackGiven === 'correct' ? 'bg-green-50 border-green-300' :
+                        phi.feedbackGiven === 'incorrect' ? 'bg-red-50 border-red-300' :
+                        'bg-red-50 border-red-200'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between mb-2">
+                        <div className="flex-1">
+                          <p className="font-semibold text-red-900 mb-1">
+                            {phi.type.toUpperCase()}
+                          </p>
+                          <p className="text-red-800 font-mono text-sm break-all">
+                            {phi.value}
+                          </p>
+                          <p className="text-xs text-gray-600 mt-1">
+                            Confidence: {phi.score}
+                          </p>
+                        </div>
+                      </div>
+                      
+                      {!phi.feedbackGiven && (
+                        <div className="flex gap-2 mt-3 pt-3 border-t border-red-200">
+                          <button
+                            onClick={() => provideFeedback(phi, true)}
+                            className="flex-1 flex items-center justify-center gap-2 bg-green-500 hover:bg-green-600 text-white py-2 px-3 rounded text-sm font-semibold transition-colors"
+                          >
+                            <ThumbsUp className="w-4 h-4" />
+                            Correct
+                          </button>
+                          <button
+                            onClick={() => provideFeedback(phi, false)}
+                            className="flex-1 flex items-center justify-center gap-2 bg-red-500 hover:bg-red-600 text-white py-2 px-3 rounded text-sm font-semibold transition-colors"
+                          >
+                            <ThumbsDown className="w-4 h-4" />
+                            Wrong
+                          </button>
+                        </div>
+                      )}
+                      
+                      {phi.feedbackGiven && (
+                        <div className={`mt-3 pt-3 border-t text-center text-sm font-semibold ${
+                          phi.feedbackGiven === 'correct' ? 'text-green-700 border-green-200' : 'text-red-700 border-red-200'
+                        }`}>
+                          {phi.feedbackGiven === 'correct' ? 'Added to database - Retraining...' : 'Added to database - Retraining...'}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="bg-white rounded-lg shadow-xl p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <FileText className="w-6 h-6 text-green-600" />
+                <h2 className="text-xl font-bold text-gray-800">
+                  Redacted Note
+                </h2>
+              </div>
+              
+              <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                <pre className="whitespace-pre-wrap text-sm text-gray-800 font-mono">
+                  {result.redacted_note}
+                </pre>
+              </div>
+              
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(result.redacted_note);
+                  alert('Redacted note copied to clipboard!');
+                }}
+                className="mt-4 w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors"
+              >
+                Copy Redacted Note
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
